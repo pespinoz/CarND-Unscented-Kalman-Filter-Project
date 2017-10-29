@@ -4,6 +4,7 @@
 #include <math.h>
 #include "ukf.h"
 #include "tools.h"
+#include <fstream>
 
 using namespace std;
 
@@ -26,8 +27,7 @@ std::string hasData(std::string s) {
   return "";
 }
 
-int main()
-{
+int main() {
   uWS::Hub h;
 
   // Create a Kalman Filter instance
@@ -37,14 +37,17 @@ int main()
   Tools tools;
   vector<VectorXd> estimations;
   vector<VectorXd> ground_truth;
+  vector<double> nis_vec;
 
-  h.onMessage([&ukf,&tools,&estimations,&ground_truth](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
+  std::ofstream file("../state-vec_and_stats.txt");
+  std::ofstream file2("../data/laser_radar_data.txt");
+  // I /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+  h.onMessage([&ukf,&tools,&estimations,&ground_truth,&nis_vec,&file,&file2](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
     // The 2 signifies a websocket event
 
-    if (length && length > 2 && data[0] == '4' && data[1] == '2')
-    {
+    if (length && length > 2 && data[0] == '4' && data[1] == '2') {
 
       auto s = hasData(std::string(data));
       if (s != "") {
@@ -56,11 +59,16 @@ int main()
         if (event == "telemetry") {
           // j[1] is the data JSON object
           
-          string sensor_measurment = j[1]["sensor_measurement"];
+          string sensor_measurement = j[1]["sensor_measurement"];
           
           MeasurementPackage meas_package;
-          istringstream iss(sensor_measurment);
+          istringstream iss(sensor_measurement);
     	  long long timestamp;
+          float px;
+          float py;
+          float ro;
+          float theta;
+          float ro_dot;
 
     	  // reads first element from the current line
     	  string sensor_type;
@@ -69,8 +77,6 @@ int main()
     	  if (sensor_type.compare("L") == 0) {
       	  		meas_package.sensor_type_ = MeasurementPackage::LASER;
           		meas_package.raw_measurements_ = VectorXd(2);
-          		float px;
-      	  		float py;
           		iss >> px;
           		iss >> py;
           		meas_package.raw_measurements_ << px, py;
@@ -80,13 +86,10 @@ int main()
 
       	  		meas_package.sensor_type_ = MeasurementPackage::RADAR;
           		meas_package.raw_measurements_ = VectorXd(3);
-          		float ro;
-      	  		float theta;
-      	  		float ro_dot;
           		iss >> ro;
           		iss >> theta;
           		iss >> ro_dot;
-          		meas_package.raw_measurements_ << ro,theta, ro_dot;
+          		meas_package.raw_measurements_ << ro, theta, ro_dot;
           		iss >> timestamp;
           		meas_package.timestamp_ = timestamp;
           }
@@ -94,10 +97,14 @@ int main()
     	  float y_gt;
     	  float vx_gt;
     	  float vy_gt;
+          float yaw_gt;
+          float yawrate_gt;
     	  iss >> x_gt;
     	  iss >> y_gt;
     	  iss >> vx_gt;
     	  iss >> vy_gt;
+          iss >> yaw_gt;
+          iss >> yawrate_gt;
     	  VectorXd gt_values(4);
     	  gt_values(0) = x_gt;
     	  gt_values(1) = y_gt; 
@@ -106,10 +113,10 @@ int main()
     	  ground_truth.push_back(gt_values);
           
           //Call ProcessMeasurment(meas_package) for Kalman filter
-    	  ukf.ProcessMeasurement(meas_package);    	  
+    	  ukf.ProcessMeasurement(meas_package);
 
+          nis_vec.push_back(ukf.nis_);
     	  //Push the current estimated x,y positon from the Kalman filter's state vector
-
     	  VectorXd estimate(4);
 
     	  double p_x = ukf.x_(0);
@@ -137,12 +144,29 @@ int main()
           msgJson["rmse_vx"] = RMSE(2);
           msgJson["rmse_vy"] = RMSE(3);
           auto msg = "42[\"estimate_marker\"," + msgJson.dump() + "]";
-          // std::cout << msg << std::endl;
           ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
-	  
+
+          if (file.is_open()) {
+                file.precision(7);
+                file << ukf.x_(0) << ", " << ukf.x_(1) << ", " << ukf.x_(2) << ", " << ukf.x_(3) << ", "
+                     << ukf.x_(4) << ", " << ukf.nis_ << ", " << RMSE(0) << ", " << RMSE(1) << ", " << RMSE(2) << ", "
+                     << RMSE(3) << std::endl;
+          }
+          if (file2.is_open()) {
+              if (sensor_type.compare("L") == 0) {
+                file2.precision(7);
+                file2 << sensor_type << ", " << px << ", " << py << ", " << timestamp << ", " << x_gt << ", " << y_gt
+                      << ", " << vx_gt << ", " << vy_gt << ", " << yaw_gt << ", " << yawrate_gt << std::endl;
+              }
+              else if (sensor_type.compare("R") == 0) {
+                file2.precision(7);
+                file2 << sensor_type << ", " << ro << ", " << theta << ", " << ro_dot << ", " << timestamp
+                      << ", " << x_gt << ", " << y_gt << ", " << vx_gt << ", " << vy_gt << ", " << yaw_gt
+                      << ", " << yawrate_gt << std::endl;
+              }
+          }
         }
       } else {
-        
         std::string msg = "42[\"manual\",{}]";
         ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
       }
@@ -150,126 +174,38 @@ int main()
 
   });
 
+  // II ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   // We don't need this since we're not using HTTP but if it's removed the program
   // doesn't compile :-(
   h.onHttpRequest([](uWS::HttpResponse *res, uWS::HttpRequest req, char *data, size_t, size_t) {
     const std::string s = "<h1>Hello world!</h1>";
-    if (req.getUrl().valueLength == 1)
-    {
+    if (req.getUrl().valueLength == 1) {
       res->end(s.data(), s.length());
     }
-    else
-    {
+    else {
       // i guess this should be done more gracefully?
       res->end(nullptr, 0);
     }
   });
 
+  // III ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
   h.onConnection([&h](uWS::WebSocket<uWS::SERVER> ws, uWS::HttpRequest req) {
     std::cout << "Connected!!!" << std::endl;
   });
 
+  // IV ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   h.onDisconnection([&h](uWS::WebSocket<uWS::SERVER> ws, int code, char *message, size_t length) {
     ws.close();
     std::cout << "Disconnected" << std::endl;
   });
 
   int port = 4567;
-  if (h.listen(port))
-  {
+  if (h.listen(port)) {
     std::cout << "Listening to port " << port << std::endl;
   }
-  else
-  {
+  else {
     std::cerr << "Failed to listen to port" << std::endl;
     return -1;
   }
   h.run();
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
